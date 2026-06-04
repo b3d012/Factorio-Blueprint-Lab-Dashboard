@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { SpriteIcon } from './components/SpriteIcon';
 import { catalogEntries } from './data/kirkCatalog';
+import type { CatalogEntry } from './data/catalogTypes';
 import {
   buildBlueprintConfig,
   buildRecipeTree,
@@ -9,6 +10,7 @@ import {
   getAllowedMachineKeys,
   getBorderCells,
   getDefaultRecipeKey,
+  getRecommendedMachineForRecipe,
   getRecipeInputOptions,
   getRecipeOutputOptions,
   getProfileByKey,
@@ -53,19 +55,190 @@ function normalizePortsForRecipe(ports: PortSlot[], recipeKey: string): PortSlot
   });
 }
 
-function renderRecipeNode(node: RecipeTreeNode, path: string, depth = 0): JSX.Element {
+function formatAmount(value: number): string {
+  if (!Number.isFinite(value)) return 'Unknown';
+  return Number.isInteger(value) ? value.toString() : value.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1');
+}
+
+function formatAmountMaybe(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return 'Unknown';
+  return formatAmount(value);
+}
+
+function renderRecipeNode(
+  node: RecipeTreeNode,
+  path: string,
+  context: {
+    allowedMachineKeys: string[];
+    targetOutput: number;
+  },
+  requiredAmount: number,
+  depth = 0,
+): JSX.Element {
+  const outputsPerCraft = Math.max(1, node.amount || 1);
+  const perOutputAmount = requiredAmount / context.targetOutput;
+  const craftsNeeded = node.kind === 'recipe' ? requiredAmount / outputsPerCraft : null;
+  const machine = node.kind === 'recipe' ? getRecommendedMachineForRecipe(node.recipeKey ?? node.key, context.allowedMachineKeys) : null;
+  const iconEntry =
+    node.kind === 'recipe'
+      ? catalogEntries.find((entry) => entry.key === (node.recipeKey ?? node.key)) ?? null
+      : catalogEntries.find((entry) => entry.key === node.key) ?? null;
+  const childNodes = node.children ?? [];
+
   return (
-    <div key={path} className={`tree-row depth-${depth}`}>
-      <div className={`tree-node ${node.kind}`}>
-        <div className="tree-topline">
-          <strong>{node.label}</strong>
-          <span>{node.rate}</span>
+    <div key={path} className={`tree-node tree-depth-${depth}`}>
+      <div className={`node-card ${node.kind}`}>
+        <div className="tree-node-head">
+          <div className="tree-node-icon">
+            <SpriteIcon sprite={iconEntry?.icon ?? machine?.icon ?? recipeEntries[0].icon} size={34} className="tree-icon" />
+          </div>
+          <div className="tree-node-main">
+            <div className="tree-node-title">
+              <strong>{node.label}</strong>
+              <span>{node.kind === 'recipe' ? 'Final recipe' : node.producerName ? 'Intermediate item' : 'Raw input'}</span>
+            </div>
+            <div className="tree-node-rates">
+              <span>Per 1 output: <strong>{formatAmountMaybe(perOutputAmount)}</strong></span>
+              <span>
+                {context.targetOutput} output{context.targetOutput === 1 ? '' : 's'}: <strong>{formatAmountMaybe(requiredAmount)}</strong>
+              </span>
+            </div>
+          </div>
         </div>
-        {node.note ? <p>{node.note}</p> : null}
+        <div className="tree-node-body">
+          <div className="tree-chip-row">
+            <span className="tree-chip">{formatAmountMaybe(node.amount)} / craft</span>
+            {node.rate ? <span className="tree-chip tree-chip-muted">{node.rate}</span> : null}
+            {node.producerName ? <span className="tree-chip">From {node.producerName}</span> : null}
+            {node.note ? <span className="tree-chip tree-chip-muted">{node.note}</span> : null}
+            {node.kind === 'recipe' ? <span className="tree-chip">{formatAmountMaybe(craftsNeeded)}</span> : null}
+            {machine ? (
+              <span className="tree-chip tree-chip-machine">
+                <SpriteIcon sprite={machine.icon} size={16} className="tree-chip-icon" />
+                {machine.name}
+              </span>
+            ) : null}
+          </div>
+        </div>
       </div>
-      {node.children?.length ? <div className="tree-children">{node.children.map((child, index) => renderRecipeNode(child, `${path}-${index}`, depth + 1))}</div> : null}
+
+      {childNodes.length > 0 ? <div className="connector-vertical" aria-hidden="true" /> : null}
+      {childNodes.length > 0 ? <div className="connector-horizontal" aria-hidden="true" /> : null}
+
+      {childNodes.length > 0 ? (
+        <div className="children-row">
+          {childNodes.map((child, index) => {
+            const nextRequiredAmount =
+              node.kind === 'recipe' ? child.amount * (requiredAmount / outputsPerCraft) : requiredAmount;
+            return (
+              <div key={`${path}-${index}`} className="child-subtree">
+                <div className="connector-vertical child" aria-hidden="true" />
+                {renderRecipeNode(child, `${path}-${index}`, context, nextRequiredAmount, depth + 1)}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
+}
+
+interface SummaryOccurrence {
+  path: string;
+  amount: number;
+}
+
+interface SummaryRow {
+  key: string;
+  label: string;
+  total: number;
+  kind: 'raw' | 'intermediate' | 'final';
+  icon: CatalogEntry['icon'];
+  breakdown: SummaryOccurrence[];
+  note?: string;
+}
+
+function findCatalogEntryByKey(key: string): CatalogEntry | null {
+  return catalogEntries.find((entry) => entry.key === key) ?? null;
+}
+
+function isCraftableItem(key: string): boolean {
+  return recipeEntries.some((recipe) => recipe.results?.some((result) => result.key === key));
+}
+
+function buildAggregatedSummary(root: RecipeTreeNode | null, targetOutput: number, finalRecipe: CatalogEntry | null): {
+  raw: SummaryRow[];
+  intermediate: SummaryRow[];
+  final: SummaryRow[];
+} {
+  if (!root) {
+    return { raw: [], intermediate: [], final: [] };
+  }
+
+  const summaryMap = new Map<string, SummaryRow>();
+  const rootOutputsPerCraft = Math.max(1, root.amount || 1);
+
+  const addOccurrence = (node: RecipeTreeNode, amount: number, path: string[]) => {
+    const itemEntry = findCatalogEntryByKey(node.key);
+    const kind: SummaryRow['kind'] = isCraftableItem(node.key) ? 'intermediate' : 'raw';
+    const existing = summaryMap.get(node.key);
+    const label = itemEntry?.name ?? node.label;
+    const occurrence: SummaryOccurrence = {
+      path: path.join(' → '),
+      amount,
+    };
+
+    if (existing) {
+      existing.total += amount;
+      existing.breakdown.push(occurrence);
+      return;
+    }
+
+    summaryMap.set(node.key, {
+      key: node.key,
+      label,
+      total: amount,
+      kind,
+      icon: itemEntry?.icon ?? findCatalogEntryByKey(root.key)?.icon ?? recipeEntries[0].icon,
+      breakdown: [occurrence],
+      note: node.note,
+    });
+  };
+
+  const walk = (node: RecipeTreeNode, amount: number, path: string[]) => {
+    if (node.kind === 'ingredient') {
+      addOccurrence(node, amount, path);
+    }
+
+    const outputsPerCraft = Math.max(1, node.amount || 1);
+    for (const child of node.children ?? []) {
+      const nextAmount = node.kind === 'recipe' ? child.amount * (amount / outputsPerCraft) : amount;
+      walk(child, nextAmount, [...path, node.label]);
+    }
+  };
+
+  for (const child of root.children ?? []) {
+    walk(child, child.amount * (targetOutput / rootOutputsPerCraft), [root.label]);
+  }
+
+  const rows = [...summaryMap.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+  const raw = rows.filter((row) => row.kind === 'raw');
+  const intermediate = rows.filter((row) => row.kind === 'intermediate');
+  const finalRow: SummaryRow = {
+    key: finalRecipe?.key ?? root.key,
+    label: finalRecipe?.results?.[0]?.name ?? root.label,
+    total: targetOutput,
+    kind: 'final',
+    icon: finalRecipe?.icon ?? findCatalogEntryByKey(root.key)?.icon ?? recipeEntries[0].icon,
+    breakdown: [{ path: `Selected output scale`, amount: targetOutput }],
+    note: finalRecipe?.subtitle,
+  };
+
+  return {
+    raw,
+    intermediate,
+    final: [finalRow],
+  };
 }
 
 function formatExport(config: unknown): string {
@@ -81,9 +254,11 @@ export default function App() {
   const [activePortId, setActivePortId] = useState('input-1');
   const [customWidth, setCustomWidth] = useState('12');
   const [customHeight, setCustomHeight] = useState('12');
+  const [targetOutput, setTargetOutput] = useState('1');
   const [copyState, setCopyState] = useState<'idle' | 'copied'>('idle');
 
   const selectedRecipe = recipeEntries.find((entry) => entry.key === recipeKey) ?? recipeEntries[0];
+  const targetOutputValue = Math.max(1, Number(targetOutput) || 1);
   const profile = getProfileByKey(profileKey);
   const allowedMachineKeys = getAllowedMachineKeys(profileKey);
   const allowedMachines = useMemo(() => {
@@ -91,8 +266,9 @@ export default function App() {
     return machineEntries.filter((machine) => keys.has(machine.key));
   }, [allowedMachineKeys]);
   const recipeTree = buildRecipeTree(selectedRecipe.key);
+  const aggregatedSummary = useMemo(() => buildAggregatedSummary(recipeTree, targetOutputValue, selectedRecipe), [recipeTree, targetOutputValue, selectedRecipe]);
   const assignedByCell = new Map(ports.filter((slot) => slot.cell).map((slot) => [cellId(slot.cell as PortCell), slot]));
-  const exportConfig = buildBlueprintConfig(grid, selectedRecipe.key, profileKey, allowedMachineKeys, ports);
+  const exportConfig = buildBlueprintConfig(grid, selectedRecipe.key, targetOutputValue, profileKey, allowedMachineKeys, ports);
   const exportJson = formatExport(exportConfig);
   const activePort = ports.find((slot) => slot.id === activePortId) ?? null;
   const inputOptions = getRecipeInputOptions(selectedRecipe.key);
@@ -560,9 +736,137 @@ export default function App() {
             </div>
 
             <section className="detail-section">
-              <h3>Ingredient tree</h3>
-              <div className="tree-view" key={selectedRecipe.key}>
-                {recipeTree ? renderRecipeNode(recipeTree, recipeTree.key) : <div className="empty-note">No recipe tree available.</div>}
+              <div className="detail-section-head">
+                <h3>Recipe flow</h3>
+                <label className="scale-control">
+                  <span>Scale to outputs</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={targetOutput}
+                    onChange={(event) => setTargetOutput(event.target.value)}
+                  />
+                </label>
+              </div>
+              <p className="subtle">
+                This view shows the recipe as a flow of cards, with numbers scaled to produce {targetOutputValue} output{targetOutputValue === 1 ? '' : 's'}.
+              </p>
+              <div className="tree-scroll">
+                <div className="tree-canvas" key={selectedRecipe.key}>
+                {recipeTree ? (
+                  renderRecipeNode(
+                    recipeTree,
+                    recipeTree.key,
+                    {
+                      allowedMachineKeys,
+                      targetOutput: targetOutputValue,
+                    },
+                    targetOutputValue,
+                  )
+                ) : (
+                  <div className="empty-note">No recipe tree available.</div>
+                )}
+                </div>
+              </div>
+            </section>
+
+            <section className="detail-section">
+              <div className="detail-section-head">
+                <h3>Aggregated totals</h3>
+              </div>
+              <div className="summary-panel">
+                <div className="summary-group">
+                  <h4>Final output</h4>
+                  {aggregatedSummary.final.map((row) => (
+                    <details key={row.key} className="summary-item" open>
+                      <summary className="summary-row">
+                        <div className="summary-row-main">
+                          <SpriteIcon sprite={row.icon} size={28} className="summary-icon" />
+                          <div className="summary-copy">
+                            <strong>{row.label}</strong>
+                            <span>Final output</span>
+                          </div>
+                        </div>
+                        <div className="summary-row-total">
+                          <strong>{formatAmountMaybe(row.total)}</strong>
+                        </div>
+                      </summary>
+                      <div className="summary-breakdown">
+                        {row.breakdown.map((entry) => (
+                          <div key={`${row.key}-${entry.path}`} className="summary-breakdown-row">
+                            <span>{entry.path}</span>
+                            <strong>{formatAmountMaybe(entry.amount)}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+
+                <div className="summary-group">
+                  <h4>Raw inputs</h4>
+                  {aggregatedSummary.raw.length > 0 ? (
+                    aggregatedSummary.raw.map((row) => (
+                      <details key={row.key} className="summary-item">
+                        <summary className="summary-row">
+                          <div className="summary-row-main">
+                            <SpriteIcon sprite={row.icon} size={28} className="summary-icon" />
+                            <div className="summary-copy">
+                              <strong>{row.label}</strong>
+                              <span>Raw input</span>
+                            </div>
+                          </div>
+                          <div className="summary-row-total">
+                            <strong>{formatAmountMaybe(row.total)}</strong>
+                          </div>
+                        </summary>
+                        <div className="summary-breakdown">
+                          {row.breakdown.map((entry) => (
+                            <div key={`${row.key}-${entry.path}`} className="summary-breakdown-row">
+                              <span>{entry.path}</span>
+                              <strong>{formatAmountMaybe(entry.amount)}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ))
+                  ) : (
+                    <div className="empty-note">No raw inputs found for this recipe.</div>
+                  )}
+                </div>
+
+                <div className="summary-group">
+                  <h4>Intermediate totals</h4>
+                  {aggregatedSummary.intermediate.length > 0 ? (
+                    aggregatedSummary.intermediate.map((row) => (
+                      <details key={row.key} className="summary-item">
+                        <summary className="summary-row">
+                          <div className="summary-row-main">
+                            <SpriteIcon sprite={row.icon} size={28} className="summary-icon" />
+                            <div className="summary-copy">
+                              <strong>{row.label}</strong>
+                              <span>Craftable dependency</span>
+                            </div>
+                          </div>
+                          <div className="summary-row-total">
+                            <strong>{formatAmountMaybe(row.total)}</strong>
+                          </div>
+                        </summary>
+                        <div className="summary-breakdown">
+                          {row.breakdown.map((entry) => (
+                            <div key={`${row.key}-${entry.path}`} className="summary-breakdown-row">
+                              <span>{entry.path}</span>
+                              <strong>{formatAmountMaybe(entry.amount)}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ))
+                  ) : (
+                    <div className="empty-note">No intermediate totals found for this recipe.</div>
+                  )}
+                </div>
               </div>
             </section>
 

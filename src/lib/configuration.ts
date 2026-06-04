@@ -39,12 +39,16 @@ export interface RecipeTreeNode {
   amount: number;
   rate: string;
   note?: string;
+  producerKey?: string;
+  producerName?: string;
+  recipeKey?: string;
   children?: RecipeTreeNode[];
 }
 
 export interface BlueprintConfig {
   grid: GridSize;
   recipeKey: string;
+  targetOutput: number;
   researchProfile: string;
   allowedMachineKeys: string[];
   ports: PortSlot[];
@@ -186,7 +190,7 @@ export function buildRecipeTree(recipeKey: string, depth = 0, seen = new Set<str
     );
     const baseRate = `${ingredient.amount} / craft`;
 
-    if (producer && depth < 2) {
+    if (producer) {
       const branch = buildRecipeTree(producer.key, depth + 1, nextSeen);
       return {
         key: ingredient.key,
@@ -195,7 +199,10 @@ export function buildRecipeTree(recipeKey: string, depth = 0, seen = new Set<str
         amount: ingredient.amount,
         rate: baseRate,
         note: `Produced by ${producer.name}`,
-        children: branch ? [branch] : undefined,
+        producerKey: producer.key,
+        producerName: producer.name,
+        recipeKey: producer.key,
+        children: branch?.children,
       };
     }
 
@@ -217,8 +224,20 @@ export function buildRecipeTree(recipeKey: string, depth = 0, seen = new Set<str
     amount: recipe.results?.[0]?.amount ?? 1,
     rate: formatBaseRate(recipe),
     note: recipe.recipe ? `${recipe.recipe.category} | ${recipe.recipe.energyRequired}s` : undefined,
+    recipeKey: recipe.key,
     children,
   };
+}
+
+export function getRecommendedMachineForRecipe(recipeKey: string, allowedMachineKeys: string[]): CatalogEntry | null {
+  const recipe = recipeEntries.find((entry) => entry.key === recipeKey);
+  if (!recipe?.recipe) return null;
+  const category = recipe.recipe.category;
+
+  return machineEntries.find(
+    (machine) =>
+      allowedMachineKeys.includes(machine.key) && !!machine.machine?.categories.includes(category),
+  ) ?? null;
 }
 
 export function getRecipeInputOptions(recipeKey: string): PortBindingOption[] {
@@ -270,6 +289,7 @@ export function getRecipeOutputOptions(recipeKey: string): PortBindingOption[] {
 export function buildBlueprintConfig(
   grid: GridSize,
   recipeKey: string,
+  targetOutput: number,
   researchProfile: string,
   allowedMachineKeys: string[],
   ports: PortSlot[],
@@ -277,6 +297,7 @@ export function buildBlueprintConfig(
   return {
     grid,
     recipeKey,
+    targetOutput,
     researchProfile,
     allowedMachineKeys,
     ports,
