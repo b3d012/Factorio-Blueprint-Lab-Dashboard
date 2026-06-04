@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { SpriteIcon } from './components/SpriteIcon';
 import { catalogEntries } from './data/kirkCatalog';
 import {
@@ -98,6 +98,11 @@ export default function App() {
   const inputOptions = getRecipeInputOptions(selectedRecipe.key);
   const outputOptions = getRecipeOutputOptions(selectedRecipe.key);
 
+  useEffect(() => {
+    if (ports.some((slot) => slot.id === activePortId)) return;
+    setActivePortId(ports[0]?.id ?? '');
+  }, [activePortId, ports]);
+
   const filteredRecipes = recipeEntries.filter((entry) => {
     const term = recipeSearch.trim().toLowerCase();
     if (!term) return true;
@@ -182,6 +187,10 @@ export default function App() {
         return { ...slot, bindingKey: binding.key, bindingLabel: binding.label };
       }),
     );
+  }
+
+  function removePort(slotId: string) {
+    setPorts((current) => current.filter((slot) => slot.id !== slotId));
   }
 
   async function copyExportJson() {
@@ -399,10 +408,15 @@ export default function App() {
             <div className="port-slot-list">
               {ports.map((slot) => (
                 <div key={slot.id} className={`port-slot ${activePortId === slot.id ? 'is-active' : ''}`}>
-                  <button type="button" className="port-slot-head" onClick={() => setActivePortId(slot.id)}>
-                    <span>{slot.label}</span>
-                    <strong>{slot.cell ? `${slot.cell.side} ${slot.cell.index + 1}` : 'unassigned'}</strong>
-                  </button>
+                  <div className="port-slot-head">
+                    <button type="button" className="port-slot-select" onClick={() => setActivePortId(slot.id)}>
+                      <span>{slot.label}</span>
+                      <strong>{slot.cell ? `${slot.cell.side} ${slot.cell.index + 1}` : 'unassigned'}</strong>
+                    </button>
+                    <button type="button" className="port-remove" onClick={() => removePort(slot.id)}>
+                      Remove
+                    </button>
+                  </div>
                   <label className="port-binding">
                     <span>{slot.kind === 'input' ? 'Bind to input' : 'Bind to output'}</span>
                     <select
@@ -479,6 +493,10 @@ export default function App() {
                   : null;
                 const assigned = cell ? assignedByCell.get(cellId(cell)) : null;
                 const active = !!cell && !!activePort?.cell && cellId(activePort.cell) === cellId(cell);
+                const padLabel = cell
+                  ? `${cell.side[0].toUpperCase()}${cell.index + 1}`
+                  : '';
+                const padName = cell ? `${cell.side.charAt(0).toUpperCase()}${cell.side.slice(1)} ${cell.index + 1}` : '';
 
                 return (
                   <button
@@ -496,12 +514,19 @@ export default function App() {
                     }}
                   >
                     {assigned ? (
-                      <>
+                      <span className="pad-card">
+                        <span className="cell-pad-name">{padName}</span>
                         <span className="cell-label">{assigned.label}</span>
-                        <span className="cell-sub">{assigned.kind}</span>
-                      </>
+                        <span className="cell-sub">
+                          {assigned.bindingLabel ?? assigned.kind}
+                          {assigned.bindingLabel ? ` • ${assigned.kind}` : ''}
+                        </span>
+                      </span>
                     ) : border ? (
-                      <span className="cell-dot" />
+                      <span className="pad-card">
+                        <span className="cell-pad-name">{padName}</span>
+                        <span className="cell-pad-code">{padLabel}</span>
+                      </span>
                     ) : null}
                   </button>
                 );

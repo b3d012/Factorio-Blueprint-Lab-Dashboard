@@ -228,19 +228,20 @@ export function getRecipeInputOptions(recipeKey: string): PortBindingOption[] {
   const totals = new Map<string, PortBindingOption>();
 
   const walk = (node: RecipeTreeNode) => {
-    if (node.kind === 'ingredient' && (!node.children || node.children.length === 0)) {
+    if (node.kind === 'ingredient') {
+      const canonicalItem = itemEntries.find((item) => item.key === node.key);
+      const label = canonicalItem?.name ?? node.label;
       const existing = totals.get(node.key);
       if (existing) {
         existing.amount += node.amount;
-        return;
+      } else {
+        totals.set(node.key, {
+          key: node.key,
+          label,
+          amount: node.amount,
+          note: node.note,
+        });
       }
-      totals.set(node.key, {
-        key: node.key,
-        label: node.label,
-        amount: node.amount,
-        note: node.note,
-      });
-      return;
     }
 
     for (const child of node.children ?? []) {
@@ -248,7 +249,10 @@ export function getRecipeInputOptions(recipeKey: string): PortBindingOption[] {
     }
   };
 
-  walk(tree);
+  for (const child of tree.children ?? []) {
+    walk(child);
+  }
+
   return [...totals.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
